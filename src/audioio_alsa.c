@@ -169,7 +169,7 @@ bool audioio_alsa_init(const char* device, int rate, int audio_latency, char mod
 
         for (int i = 0; i < device_count; i++){
             struct SoundIoDevice *snd_device = __soundio_get_device(soundio, i);
-            if (strcmp(snd_device->name, device) == 0) {
+            if (strcmp(snd_device->id, device) == 0) {
                 device_index = i;
                 found = true;
             }
