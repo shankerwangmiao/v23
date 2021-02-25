@@ -3,12 +3,16 @@
 #include <stdarg.h>
 #include <string.h>
 #include <soundio/soundio.h>
+#include <pthread.h>
 
 static struct SoundIo *soundio = NULL;
 static struct SoundIoDevice *soundio_device = NULL;
 static struct SoundIoInStream *instream = NULL;
 static struct SoundIoOutStream *outstream = NULL;
 struct SoundIoRingBuffer *ring_buffer = NULL;
+
+pthread_mutex_t ringbuffer_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t ringbuffer_cond = PTHREAD_COND_INITIALIZER;
 
 #define panic(fmt, ...) do {\
     __panic(fmt, __FUNCTION__, __FILE__, __LINE__, ##__VA_ARGS__); \
@@ -65,7 +69,10 @@ static void read_callback(struct SoundIoInStream *instream, int frame_count_min,
             break;
     }
     int advance_bytes = write_frames * instream->bytes_per_frame;
+    pthread_mutex_lock(&ringbuffer_mutex);
     soundio_ring_buffer_advance_write_ptr(ring_buffer, advance_bytes);
+    pthread_mutex_unlock(&ringbuffer_mutex);
+    pthread_cond_signal(&ringbuffer_cond);
 }
 static void write_callback(struct SoundIoOutStream *outstream, int frame_count_min, int frame_count_max) {
     struct SoundIoChannelArea *areas;
@@ -116,7 +123,10 @@ static void write_callback(struct SoundIoOutStream *outstream, int frame_count_m
             panic("end write error: %s", soundio_strerror(err));
         frames_left -= frame_count;
     }
+    pthread_mutex_lock(&ringbuffer_mutex);
     soundio_ring_buffer_advance_read_ptr(ring_buffer, read_count * outstream->bytes_per_frame);
+    pthread_mutex_unlock(&ringbuffer_mutex);
+    pthread_cond_signal(&ringbuffer_cond);
 }
 static void underflow_callback(struct SoundIoOutStream *outstream) {
     static int count = 0;
@@ -240,7 +250,11 @@ bool audioio_alsa_init(const char* device, int rate, int audio_latency, char mod
 
 size_t audioio_alsa_getsamples(int16_t *buf, size_t n)
 {
-    while(soundio_ring_buffer_fill_count(ring_buffer) == 0);
+    pthread_mutex_lock(&ringbuffer_mutex);
+    while(soundio_ring_buffer_fill_count(ring_buffer) == 0){
+    	pthread_cond_wait(&ringbuffer_cond, &ringbuffer_mutex);
+    }
+    pthread_mutex_unlock(&ringbuffer_mutex);
     char *read_ptr = soundio_ring_buffer_read_ptr(ring_buffer);
     int fill_count = soundio_ring_buffer_fill_count(ring_buffer) / sizeof(buf[0]);
     fill_count = fill_count > n ? n : fill_count;
@@ -252,7 +266,11 @@ size_t audioio_alsa_getsamples(int16_t *buf, size_t n)
 size_t audioio_alsa_putsamples(int16_t *buf, size_t n)
 {
     //fprintf(stderr, "putsamples: start\n");
-    while(soundio_ring_buffer_free_count(ring_buffer) == 0);
+    pthread_mutex_lock(&ringbuffer_mutex);
+    while(soundio_ring_buffer_free_count(ring_buffer) == 0){
+        pthread_cond_wait(&ringbuffer_cond, &ringbuffer_mutex);
+    }
+    pthread_mutex_unlock(&ringbuffer_mutex);
     char *write_ptr = soundio_ring_buffer_write_ptr(ring_buffer);
     int free_count = soundio_ring_buffer_free_count(ring_buffer) / sizeof(buf[0]);
     free_count = free_count > n ? n : free_count;
